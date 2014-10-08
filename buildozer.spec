@@ -155,3 +155,8 @@ log_level = 1
 # Then, invoke the command line with the "demo" profile:
 #
 #     buildozer --profile demo android debug
+
+[app:android.meta_data]
+surface.transparent = 1
+surface.depth = 16
+android.background_color = 0

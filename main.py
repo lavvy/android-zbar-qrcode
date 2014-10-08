@@ -80,6 +80,20 @@ class SurfaceHolderCallback(PythonJavaClass):
     def surfaceDestroyed(self, surface):
         pass
 
+class TouchListener(PythonJavaClass):
+    __javacontext__ = 'app'
+    __javainterfaces__ = [
+        'org/renpy/android/SDLSurfaceView$OnInterceptTouchListener']
+
+    def __init__(self, listener):
+        super(TouchListener, self).__init__()
+        self.listener = listener
+
+    @java_method('(Landroid/view/MotionEvent;)Z')
+    def onTouch(self, event):
+        x = event.getX(0)
+        y = event.getY(0)
+        return self.listener(x, y)
 
 class AndroidWidgetHolder(Widget):
     '''Act as a placeholder for an Android widget.
@@ -95,12 +109,35 @@ class AndroidWidgetHolder(Widget):
     def __init__(self, **kwargs):
         self._old_view = None
         from kivy.core.window import Window
-        self._window = Window
-        kwargs['size_hint'] = (None, None)
+        self._wh = Window.height
+        self._listener = TouchListener(self._on_touch_listener)
+
+        #from kivy.app import App
+        #App.get_running_app().bind(on_resume=self._reorder)
         super(AndroidWidgetHolder, self).__init__(**kwargs)
+
+    def _get_view_bbox(self):
+        x, y = self.to_window(*self.pos)
+        w, h = self.size
+        #return (0, 0, int(w), int(h))
+        return [int(z) for z in [x, self._wh - y - self.height, self.width, self.height]]
+
+    def reposition_view(self):
+        # XXX currently broken
+        return
+        x, y, w, h = self._get_view_bbox()
+        params = self.view.getLayoutParams()
+        if not self.view or not params:
+            return
+        params.width = w
+        params.height = h
+        self.view.setLayoutParams(params)
+        self.view.setX(x)
+        self.view.setY(y)
 
     def on_view(self, instance, view):
         if self._old_view is not None:
+            # XXX probably broken
             layout = cast(LinearLayout, self._old_view.getParent())
             layout.removeView(self._old_view)
             self._old_view = None
@@ -108,28 +145,62 @@ class AndroidWidgetHolder(Widget):
         if view is None:
             return
 
-        activity = PythonActivity.mActivity
-        activity.addContentView(view, LayoutParams(*self.size))
-        view.setZOrderOnTop(True)
-        view.setX(self.x)
-        view.setY(self._window.height - self.y - self.height)
+        x, y, w, h = self._get_view_bbox()
+
+        # XXX we assume it's the default layout from main.xml
+        # It could break.
+        parent = cast(LinearLayout, PythonActivity.mView.getParent())
+        parent.addView(view, 0, LayoutParams(w, h))
+
+        # we need to differenciate if there is interaction with our holder or
+        # not.
+        # XXX must be activated only if the view is displayed on the screen!
+        PythonActivity.mView.setInterceptTouchListener(self._listener)
+
+        view.setX(x)
+        view.setY(y)
         self._old_view = view
 
     def on_size(self, instance, size):
         if self.view:
-            params = self.view.getLayoutParams()
-            params.width = self.width
-            params.height = self.height
-            self.view.setLayoutParams(params)
-            self.view.setY(self._window.height - self.y - self.height)
+            self.reposition_view()
 
     def on_x(self, instance, x):
         if self.view:
-            self.view.setX(x)
+            self.reposition_view()
 
     def on_y(self, instance, y):
         if self.view:
-            self.view.setY(self._window.height - self.y - self.height)
+            self.reposition_view()
+
+    #
+    # Determine if the touch is going to be for us, or for the android widget.
+    # If we find any Kivy widget behind the touch (except us), then avoid the
+    # dispatching to the map. The touch will be received by the widget later.
+    #
+
+    def _on_touch_listener(self, x, y):
+        # invert Y !
+        from kivy.core.window import Window
+        y = Window.height - y
+        # x, y are in Window coordinate. Try to select the widget under the
+        # touch.
+        widget = None
+        for child in reversed(Window.children):
+            widget = self._pick(child, x, y)
+            if not widget:
+                continue
+        if self is widget:
+            return True
+
+    def _pick(self, widget, x, y):
+        ret = None
+        if widget.collide_point(x, y):
+            ret = widget
+            x2, y2 = widget.to_local(x, y)
+            for child in reversed(widget.children):
+                ret = self._pick(child, x2, y2) or ret
+        return ret
 
 
 class AndroidCamera(Widget):
@@ -176,9 +247,21 @@ class AndroidCamera(Widget):
         self._holder.view = self._android_surface
 
     def _on_surface_changed(self, fmt, width, height):
+        print 'on surface changed', width, height
         # internal, called when the android SurfaceView is ready
         # FIXME if the size is not handled by the camera, it will failed.
         params = self._android_camera.getParameters()
+
+        sizes = params.getSupportedPreviewSizes()
+        for i in range(sizes.size()):
+            size = sizes.get(i)
+            print 'preview sizes', size.width, size.height
+        sizes = params.getSupportedPictureSizes()
+        for i in range(sizes.size()):
+            size = sizes.get(i)
+            print 'picture sizes', size.width, size.height
+
+        # decide the best preview size
         params.setPreviewSize(width, height)
         self._android_camera.setParameters(params)
 
@@ -226,13 +309,16 @@ class ZbarQrcodeDetector(AnchorLayout):
 
     symbols = ListProperty([])
 
-    # XXX can't work now, due to overlay.
-    show_bounds = BooleanProperty(False)
+    show_bounds = BooleanProperty(True)
 
     Qrcode = namedtuple('Qrcode',
             ['type', 'data', 'bounds', 'quality', 'count'])
 
     def __init__(self, **kwargs):
+        # force Window clearcolor to be transparent.
+        from kivy.core.window import Window
+        Window.clearcolor = (0, 0, 0, 0)
+
         super(ZbarQrcodeDetector, self).__init__(**kwargs)
         self._camera = AndroidCamera(
                 size=self.camera_size,
@@ -284,8 +370,6 @@ class ZbarQrcodeDetector(AnchorLayout):
 
         self.symbols = symbols
 
-    '''
-    # can't work, due to the overlay.
     def on_symbols(self, instance, value):
         if self.show_bounds:
             self.update_bounds()
@@ -301,7 +385,6 @@ class ZbarQrcodeDetector(AnchorLayout):
                 x = self._camera.right - x - w
                 y = self._camera.top - y - h
                 Line(rectangle=[x, y, w, h], group='bounds')
-    '''
 
 
 if __name__ == '__main__':
